@@ -77,3 +77,4 @@ desktop.ini
 .cache/
 .turbo/
 /dist/
+google-credentials.json
