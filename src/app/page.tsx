@@ -1,6 +1,11 @@
+import { unstable_cache } from "next/cache"
 import { getCloudflareData } from "@/lib/cloudflare"
 import { getSearchConsoleData } from "@/lib/search-console"
 import { getBingData } from "@/lib/bing"
+
+const cachedCloudflare = unstable_cache(getCloudflareData, ["cloudflare"], { revalidate: 3600 })
+const cachedSC         = unstable_cache(getSearchConsoleData, ["search-console"], { revalidate: 3600 })
+const cachedBing       = unstable_cache(getBingData, ["bing"], { revalidate: 3600 })
 import type {
   DayGroup, CountryEntry, StatusEntry, ContentEntry,
   BrowserEntry, SSLEntry, HTTPVerEntry, IPClassEntry,
@@ -171,7 +176,7 @@ export const dynamic = "force-dynamic"
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default async function Home() {
-  const [data, sc, bing] = await Promise.all([getCloudflareData(), getSearchConsoleData(), getBingData()])
+  const [data, sc, bing] = await Promise.all([cachedCloudflare(), cachedSC(), cachedBing()])
   if (!data) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <p className="text-red-500">Failed to fetch. Check API credentials in .env</p>
