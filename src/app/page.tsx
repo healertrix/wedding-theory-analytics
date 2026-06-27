@@ -56,10 +56,10 @@ const SC_A3_TO_A2: Record<string, string> = {
   "svk":"SK","svn":"SI","zaf":"ZA","zwe":"ZW","esp":"ES","swe":"SE","che":"CH",
   "tha":"TH","tun":"TN","tur":"TR","ukr":"UA","are":"AE","gbr":"GB","usa":"US",
   "ury":"UY","ven":"VE","vnm":"VN","yem":"YE","bhr":"BH","est":"EE","mlt":"MT",
-  "mng":"MN","mmr":"MM","lbn":"LB","jor":"JO","cri":"CR","pry":"PY","bol":"BO",
-  "ecu":"EC","dom":"DO","gtm":"GT","hnk":"HK","twn":"TW","aze":"AZ","geo":"GE",
+  "mng":"MN","mmr":"MM","lbn":"LB","cri":"CR","pry":"PY","bol":"BO",
+  "ecu":"EC","dom":"DO","hnk":"HK","twn":"TW","aze":"AZ","geo":"GE",
   "arm":"AM","kaz":"KZ","uzb":"UZ","bih":"BA","srb":"RS","mkd":"MK","alg":"DZ",
-  "mac":"MO","khm":"KH","lao":"LA","khm":"KH",
+  "mac":"MO","lao":"LA",
 }
 
 // ─── UI primitives ────────────────────────────────────────────────────────────
