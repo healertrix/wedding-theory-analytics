@@ -14,10 +14,17 @@ const SC_V1 = "https://searchconsole.googleapis.com/v1"
 
 function fmtDate(d: Date) { return d.toISOString().split("T")[0] }
 
-// SC data is available up to yesterday — use 1-day lag not 3
+// Current period: last `daysBack` days ending yesterday
 function buildRange(daysBack: number) {
   const end = new Date(); end.setDate(end.getDate() - 1)
-  const start = new Date(end); start.setDate(end.getDate() - daysBack)
+  const start = new Date(); start.setDate(start.getDate() - daysBack)
+  return { startDate: fmtDate(start), endDate: fmtDate(end) }
+}
+
+// Previous period: the `daysBack` days immediately before the current period (no overlap)
+function buildPrevRange(daysBack: number) {
+  const end = new Date(); end.setDate(end.getDate() - daysBack - 1)
+  const start = new Date(); start.setDate(start.getDate() - daysBack * 2)
   return { startDate: fmtDate(start), endDate: fmtDate(end) }
 }
 
@@ -71,15 +78,17 @@ export interface SCRow {
 
 export interface SCTypeData {
   searchType: string
-  // 28-day totals
+  // current period totals
   totalClicks: number
   totalImpressions: number
   avgCtr: number
   avgPosition: number
-  // 7-day totals for comparison
-  clicks7d: number
-  impressions7d: number
-  // daily trend (28 days)
+  // previous period totals (for change % badges)
+  clicksPrev: number
+  impressionsPrev: number
+  ctrPrev: number
+  positionPrev: number
+  // daily trend for selected period
   byDate: SCRow[]
   topQueries: SCRow[]
   topPages:   SCRow[]
@@ -120,48 +129,56 @@ export interface SCData {
   error?: string
   startDate: string
   endDate: string
-  // performance — web, image, video, news only (no discover/googleNews)
   web:   SCTypeData
   image: SCTypeData
   video: SCTypeData
   news:  SCTypeData
-  // indexing
   sitemaps: Sitemap[]
   pageInspections: PageInspection[]
 }
 
 function emptyType(searchType: string): SCTypeData {
-  return { searchType, totalClicks: 0, totalImpressions: 0, avgCtr: 0, avgPosition: 0, clicks7d: 0, impressions7d: 0, byDate: [], topQueries: [], topPages: [], byCountry: [], byDevice: [] }
+  return {
+    searchType,
+    totalClicks: 0, totalImpressions: 0, avgCtr: 0, avgPosition: 0,
+    clicksPrev: 0, impressionsPrev: 0, ctrPrev: 0, positionPrev: 0,
+    byDate: [], topQueries: [], topPages: [], byCountry: [], byDevice: [],
+  }
 }
 
 function rows(r: unknown): SCRow[] { return (r as { rows?: SCRow[] })?.rows ?? [] }
 function sumRow(r: unknown): SCRow | undefined { return rows(r)[0] }
 
-async function fetchType(token: string, siteUrl: string, searchType: string): Promise<SCTypeData> {
-  const { startDate, endDate } = buildRange(28)
-  const { startDate: s7, endDate: e7 } = buildRange(7)
-  const base28 = { startDate, endDate, searchType, rowLimit: 25 }
+async function fetchType(token: string, siteUrl: string, searchType: string, days: number): Promise<SCTypeData> {
+  const { startDate, endDate }       = buildRange(days)
+  const { startDate: sPrev, endDate: ePrev } = buildPrevRange(days)
 
-  const [rSum, rSum7, rDate, rQuery, rPage, rCountry, rDevice] = await Promise.all([
-    scQuery(token, siteUrl, { ...base28, dimensions: [] }),
-    scQuery(token, siteUrl, { startDate: s7, endDate: e7, searchType, dimensions: [] }),
-    scQuery(token, siteUrl, { ...base28, dimensions: ["date"], rowLimit: 28 }),
-    scQuery(token, siteUrl, { ...base28, dimensions: ["query"] }),
-    scQuery(token, siteUrl, { ...base28, dimensions: ["page"] }),
-    scQuery(token, siteUrl, { ...base28, dimensions: ["country"], rowLimit: 20 }),
-    scQuery(token, siteUrl, { ...base28, dimensions: ["device"] }),
+  const base     = { startDate, endDate, searchType, rowLimit: 25 }
+  const basePrev = { startDate: sPrev, endDate: ePrev, searchType, rowLimit: 1, dimensions: [] as string[] }
+
+  const [rSum, rSumPrev, rDate, rQuery, rPage, rCountry, rDevice] = await Promise.all([
+    scQuery(token, siteUrl, { ...base, dimensions: [] }),
+    scQuery(token, siteUrl, basePrev),
+    scQuery(token, siteUrl, { ...base, dimensions: ["date"], rowLimit: days }),
+    scQuery(token, siteUrl, { ...base, dimensions: ["query"] }),
+    scQuery(token, siteUrl, { ...base, dimensions: ["page"] }),
+    scQuery(token, siteUrl, { ...base, dimensions: ["country"], rowLimit: 20 }),
+    scQuery(token, siteUrl, { ...base, dimensions: ["device"] }),
   ])
 
-  const s = sumRow(rSum)
-  const s7r = sumRow(rSum7)
+  const s     = sumRow(rSum)
+  const sPrevData = sumRow(rSumPrev)
+
   return {
     searchType,
     totalClicks:      s?.clicks      ?? 0,
     totalImpressions: s?.impressions ?? 0,
     avgCtr:           s?.ctr         ?? 0,
     avgPosition:      s?.position    ?? 0,
-    clicks7d:         s7r?.clicks      ?? 0,
-    impressions7d:    s7r?.impressions ?? 0,
+    clicksPrev:       sPrevData?.clicks      ?? 0,
+    impressionsPrev:  sPrevData?.impressions ?? 0,
+    ctrPrev:          sPrevData?.ctr         ?? 0,
+    positionPrev:     sPrevData?.position    ?? 0,
     byDate:    rows(rDate),
     topQueries: rows(rQuery),
     topPages:   rows(rPage),
@@ -200,14 +217,14 @@ function parseInspection(url: string, j: Record<string, unknown>): PageInspectio
   }
 }
 
-// ─── Main fetch (analytics + sitemaps — fast, all parallel) ──────────────────
+// ─── Main fetch ───────────────────────────────────────────────────────────────
 
-export async function getSearchConsoleData(): Promise<SCData | null> {
+export async function getSearchConsoleData(days: number = 7): Promise<SCData | null> {
   const siteUrl = process.env.GOOGLE_SITE_URL?.trim()
   if (!siteUrl) return null
 
   const token = await getToken()
-  const { startDate, endDate } = buildRange(28)
+  const { startDate, endDate } = buildRange(days)
 
   if (!token) return {
     ok: false, error: "Auth failed — check google-credentials.json",
@@ -218,10 +235,10 @@ export async function getSearchConsoleData(): Promise<SCData | null> {
   }
 
   const [webData, imageData, videoData, newsData, smRaw] = await Promise.all([
-    fetchType(token, siteUrl, "web"),
-    fetchType(token, siteUrl, "image"),
-    fetchType(token, siteUrl, "video"),
-    fetchType(token, siteUrl, "news"),
+    fetchType(token, siteUrl, "web", days),
+    fetchType(token, siteUrl, "image", days),
+    fetchType(token, siteUrl, "video", days),
+    fetchType(token, siteUrl, "news", days),
     wmtGet(token, `/sites/${encodeURIComponent(siteUrl)}/sitemaps`),
   ])
 
@@ -245,7 +262,7 @@ export async function getSearchConsoleData(): Promise<SCData | null> {
   }
 }
 
-// ─── Page inspection fetch (slow — sequential per Google rate limits) ─────────
+// ─── Page inspection fetch ───────────────────────────────────────────────────
 
 export async function getPageInspections(sitemapPath: string): Promise<PageInspection[]> {
   const siteUrl = process.env.GOOGLE_SITE_URL?.trim()

@@ -3,14 +3,19 @@ import { unstable_cache } from "next/cache"
 import { getCloudflareData } from "@/lib/cloudflare"
 import { getSearchConsoleData, getPageInspections } from "@/lib/search-console"
 import { getBingData } from "@/lib/bing"
+import { User } from "lucide-react"
 import { DateFilter } from "@/components/DateFilter"
 import { SparklineCard } from "@/components/SparklineCard"
 import { SingleLineChart, SCChart } from "@/components/TrafficChart"
 import { DonutChartsRow, DonutChart } from "@/components/DonutCharts"
 import { WorldMap } from "@/components/WorldMap"
 
-const cachedCloudflare      = unstable_cache(getCloudflareData, ["cloudflare"], { revalidate: 3600 })
-const cachedSC              = unstable_cache(getSearchConsoleData, ["search-console"], { revalidate: 3600 })
+function cachedCloudflare(days: number) {
+  return unstable_cache(getCloudflareData, ["cloudflare", String(days)], { revalidate: 3600 })(days)
+}
+function cachedSC(days: number) {
+  return unstable_cache(getSearchConsoleData, ["search-console", String(days)], { revalidate: 3600 })(days)
+}
 const cachedBing            = unstable_cache(getBingData, ["bing"], { revalidate: 3600 })
 const cachedPageInspections = (sitemapPath: string) =>
   unstable_cache(getPageInspections, ["page-inspections", sitemapPath], { revalidate: 3600 })(sitemapPath)
@@ -166,8 +171,8 @@ function SectionSkeleton() {
 
 // ─── Section 1: Website Traffic ───────────────────────────────────────────────
 
-async function CloudflareSection() {
-  const data = await cachedCloudflare()
+async function CloudflareSection({ days }: { days: number }) {
+  const data = await cachedCloudflare(days)
   if (!data) return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
       Failed to fetch Cloudflare data. Check API credentials in .env
@@ -178,12 +183,12 @@ async function CloudflareSection() {
   const allDays    = data.days
   const allRumDays = data.rumDays
 
-  const days        = allDays.length >= 14    ? allDays.slice(-7)    : allDays
-  const prevDays    = allDays.length >= 14    ? allDays.slice(0, 7)  : []
-  const rumDays     = allRumDays.length >= 14 ? allRumDays.slice(-7) : allRumDays
-  const prevRumDays = allRumDays.length >= 14 ? allRumDays.slice(0, 7) : []
+  const currDays    = allDays.length >= days    ? allDays.slice(-days)    : allDays
+  const prevDays    = allDays.length >= days * 2 ? allDays.slice(0, days)  : []
+  const currRumDays = allRumDays.length >= days    ? allRumDays.slice(-days) : allRumDays
+  const prevRumDays = allRumDays.length >= days * 2 ? allRumDays.slice(0, days) : []
 
-  const H = days.reduce((a, d) => ({
+  const H = currDays.reduce((a, d) => ({
     requests:       a.requests       + d.sum.requests,
     cachedRequests: a.cachedRequests + d.sum.cachedRequests,
     uniques:        a.uniques        + d.uniq.uniques,
@@ -194,21 +199,24 @@ async function CloudflareSection() {
     uniques:  a.uniques  + d.uniq.uniques,
   }), { requests: 0, uniques: 0 })
 
-  const rumCurr = { visits: rumDays.reduce((a, d) => a + d.sum.visits, 0), pageViews: rumDays.reduce((a, d) => a + d.count, 0) }
+  const rumCurr = { visits: currRumDays.reduce((a, d) => a + d.sum.visits, 0), pageViews: currRumDays.reduce((a, d) => a + d.count, 0) }
   const rumPrev = { visits: prevRumDays.reduce((a, d) => a + d.sum.visits, 0), pageViews: prevRumDays.reduce((a, d) => a + d.count, 0) }
 
-  const hasRUM  = rumDays.length > 0
+  const hasRUM  = currRumDays.length > 0
   const currPPV = rumCurr.visits > 0 ? rumCurr.pageViews / rumCurr.visits : 0
   const prevPPV = rumPrev.visits  > 0 ? rumPrev.pageViews / rumPrev.visits : 0
 
-  const reqSpark   = days.map(d => d.sum.requests)
-  const visitSpark = rumDays.map(d => d.sum.visits)
-  const ppvSpark   = rumDays.map(d => d.sum.visits > 0 ? d.count / d.sum.visits : 0)
+  const reqSpark   = currDays.map(d => d.sum.requests)
+  const visitSpark = currRumDays.map(d => d.sum.visits)
+  const ppvSpark   = currRumDays.map(d => d.sum.visits > 0 ? d.count / d.sum.visits : 0)
+  const periodLabel = `${days}d`
 
-  const trafficData = days.map((d, i) => ({
+  // Join by date, not by index — RUM skips days with 0 visits so array lengths can differ
+  const rumByDate = new Map(currRumDays.map(d => [d.dimensions.date, d.sum.visits]))
+  const trafficData = currDays.map(d => ({
     date:     d.dimensions.date,
     requests: d.sum.requests,
-    visits:   rumDays[i]?.sum.visits ?? 0,
+    visits:   rumByDate.get(d.dimensions.date) ?? 0,
   }))
 
   const rumCountriesData = data.rumCountries
@@ -234,31 +242,41 @@ async function CloudflareSection() {
       {/* Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <SparklineCard label="Total Requests" value={fmtNum(H.requests)}
-          change={prevDays.length ? changePct(H.requests, Hprev.requests) : undefined}
-          data={reqSpark} color="#818cf8" gradientId="grad-req" sub="CDN layer · 7 days" />
+          change={prevRumDays.length ? changePct(H.requests, Hprev.requests) : undefined}
+          data={reqSpark} color="#818cf8" gradientId="grad-req"
+          sub={`CDN layer · ${days} days`} periodLabel={periodLabel} />
         <SparklineCard label="Unique Visitors"
           value={hasRUM ? fmtNum(rumCurr.visits) : fmtNum(H.uniques)}
-          change={hasRUM && prevRumDays.length ? changePct(rumCurr.visits, rumPrev.visits) : prevDays.length ? changePct(H.uniques, Hprev.uniques) : undefined}
-          data={hasRUM ? visitSpark : days.map(d => d.uniq.uniques)}
+          change={hasRUM && prevRumDays.length ? changePct(rumCurr.visits, rumPrev.visits) : undefined}
+          data={hasRUM ? visitSpark : currDays.map(d => d.uniq.uniques)}
           color="#34d399" gradientId="grad-vis"
-          sub={hasRUM ? "RUM sessions · 7 days" : "CDN estimate · 7 days"} />
+          sub={hasRUM ? `RUM sessions · ${days} days` : `CDN estimate · ${days} days`}
+          periodLabel={periodLabel} />
         <SparklineCard label="Pages Per Visit"
           value={hasRUM ? currPPV.toFixed(2) : "—"}
           change={hasRUM && prevPPV > 0 ? changePct(currPPV, prevPPV) : undefined}
           data={hasRUM ? ppvSpark : []} color="#fbbf24" gradientId="grad-ppv"
-          sub={hasRUM ? "Avg page views per session" : "Requires RUM beacon"} />
+          sub={hasRUM ? "Avg page views per session" : "Requires RUM beacon"}
+          periodLabel={periodLabel} />
       </div>
+
+      {/* Data-age note — shown when the site is newer than the selected window */}
+      {currDays.length < days && currDays.length > 0 && (
+        <p className="text-[11px] text-white/25 -mt-1">
+          Only {currDays.length}d of traffic data available · more will accumulate over time
+        </p>
+      )}
 
       {/* Requests + Visitors — separate charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardHeader title="Total Requests" sub="CDN · 7 days" />
+          <CardHeader title="Total Requests" sub={`CDN · ${days} days`} />
           <div className="p-5 h-52">
             <SingleLineChart data={trafficData} dataKey="requests" name="Requests" color="#818cf8" />
           </div>
         </Card>
         <Card>
-          <CardHeader title="Unique Visitors" sub="RUM sessions · 7 days" />
+          <CardHeader title="Unique Visitors" sub={`RUM sessions · ${days} days`} />
           <div className="p-5 h-52">
             <SingleLineChart data={trafficData} dataKey="visits" name="Visitors" color="#34d399" />
           </div>
@@ -282,7 +300,7 @@ async function CloudflareSection() {
 
       {/* Daily Breakdown */}
       <Card>
-        <CardHeader title="Daily Breakdown" sub="7 days" />
+        <CardHeader title="Daily Breakdown" sub={`${days} days`} />
         <div className="px-5 pt-4 pb-5">
           <table className="w-full">
             <thead>
@@ -294,19 +312,19 @@ async function CloudflareSection() {
               </tr>
             </thead>
             <tbody>
-              {days.map((d, i) => (
+              {currDays.map((d, i) => (
                 <tr key={d.dimensions.date} className="hover:bg-white/[0.02] transition-colors">
                   <Td><span className="text-white/65">{d.dimensions.date}</span></Td>
                   <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(d.sum.requests)}</span></Td>
                   {hasRUM && (
                     <Td right>
-                      <span className="tabular-nums text-white/65">{rumDays[i] ? fmtNum(rumDays[i].sum.visits) : "—"}</span>
+                      <span className="tabular-nums text-white/65">{currRumDays[i] ? fmtNum(currRumDays[i].sum.visits) : "—"}</span>
                     </Td>
                   )}
                   {hasRUM && (
                     <Td right>
                       <span className="tabular-nums text-white/65">
-                        {rumDays[i] && rumDays[i].sum.visits > 0 ? (rumDays[i].count / rumDays[i].sum.visits).toFixed(2) : "—"}
+                        {currRumDays[i] && currRumDays[i].sum.visits > 0 ? (currRumDays[i].count / currRumDays[i].sum.visits).toFixed(2) : "—"}
                       </span>
                     </Td>
                   )}
@@ -377,280 +395,284 @@ async function CloudflareSection() {
 
 // ─── Section 2: Google Search Console ────────────────────────────────────────
 
-async function SearchConsoleSection() {
-  const sc = await cachedSC()
+async function SearchConsoleSection({ days }: { days: number }) {
+  const sc = await cachedSC(days)
+  const periodLabel = `${days}d`
+
+  if (!sc) return (
+    <section className="space-y-5">
+      <SectionHeader number="02" title="Google Search Performance" />
+      <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
+        Search Console not configured. Add <code className="bg-red-500/20 px-1 rounded">GOOGLE_SITE_URL</code> to .env
+      </div>
+    </section>
+  )
+
+  if (!sc.ok) return (
+    <section className="space-y-5">
+      <SectionHeader number="02" title="Google Search Performance" />
+      <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
+        <strong>Error:</strong> {sc.error}
+      </div>
+    </section>
+  )
+
+  const web   = sc.web
+  const image = sc.image
+
+  const chartData = web.byDate.map(r => ({
+    date:        r.keys[0],
+    clicks:      r.clicks,
+    impressions: Math.round(r.impressions / 10),
+  }))
+
+  const byDate     = web.byDate
+  const clickSpark = byDate.map(r => r.clicks)
+  const imprSpark  = byDate.map(r => r.impressions)
+  const posSpark   = byDate.map(r => r.position)
+  const ctrSpark   = byDate.map(r => r.ctr * 100)
+
+  // SC country map — convert alpha-3 ("ind") → alpha-2 ("IN") for WorldMap
+  const totalSCClicks    = web.byCountry.reduce((s, r) => s + r.clicks, 0)
+  const scCountryMapData = web.byCountry
+    .map(r => ({
+      code:   SC_A3_TO_A2[r.keys[0].toLowerCase()] ?? r.keys[0].toUpperCase().slice(0, 2),
+      visits: r.clicks,
+      pct:    totalSCClicks > 0 ? (r.clicks / totalSCClicks) * 100 : 0,
+    }))
+    .filter(c => c.code.length === 2)
+  const topSCCountries = scCountryMapData.slice(0, 8)
+  const maxSCPct       = topSCCountries[0]?.pct ?? 1
+
+  // Device donut
+  const deviceDonutData = web.byDevice.map(r => ({
+    name:  r.keys[0].charAt(0).toUpperCase() + r.keys[0].slice(1).toLowerCase(),
+    value: r.clicks,
+  }))
+
+  // Only compare against prior period when we have enough current data.
+  // If we only have 7d of data but the user picks 90D, the prior-period query
+  // returns old domain/content history which produces fake decrease badges.
+  const scHasSufficientData = web.byDate.length >= Math.ceil(days / 2)
 
   return (
     <section className="space-y-5">
       <SectionHeader number="02" title="Google Search Performance" />
 
-      {!sc && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
-          Search Console not configured. Add <code className="bg-red-500/20 px-1 rounded">GOOGLE_SITE_URL</code> to .env
-        </div>
+      {/* Stat Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <SparklineCard label="Avg Position"
+          value={web.avgPosition > 0 ? web.avgPosition.toFixed(1) : "—"}
+          change={scHasSufficientData && web.positionPrev > 0 ? -(changePct(web.avgPosition, web.positionPrev)) : web.totalImpressions > 0 ? null : undefined}
+          data={posSpark.map(v => 100 - v)} color="#a78bfa" gradientId="grad-pos"
+          sub={`${days} days · lower = better`} periodLabel={periodLabel} />
+        <SparklineCard label="Total Clicks" value={fmtNum(web.totalClicks)}
+          change={scHasSufficientData && web.clicksPrev > 0 ? changePct(web.totalClicks, web.clicksPrev) : web.totalClicks > 0 ? null : undefined}
+          data={clickSpark} color="#60a5fa" gradientId="grad-clicks"
+          sub={`${days} days`} periodLabel={periodLabel} />
+        <SparklineCard label="Total Impressions" value={fmtNum(web.totalImpressions)}
+          change={scHasSufficientData && web.impressionsPrev > 0 ? changePct(web.totalImpressions, web.impressionsPrev) : web.totalImpressions > 0 ? null : undefined}
+          data={imprSpark} color="#34d399" gradientId="grad-impr"
+          sub={`${days} days`} periodLabel={periodLabel} />
+        <SparklineCard label="Avg CTR"
+          value={web.totalImpressions > 0 ? (web.avgCtr * 100).toFixed(2) + "%" : "—"}
+          change={scHasSufficientData && web.ctrPrev > 0 ? changePct(web.avgCtr, web.ctrPrev) : web.totalImpressions > 0 ? null : undefined}
+          data={ctrSpark} color="#fbbf24" gradientId="grad-ctr"
+          sub="click-through rate" periodLabel={periodLabel} />
+      </div>
+
+      {/* Data-age note — shown when SC history is shorter than the selected window */}
+      {web.byDate.length > 0 && web.byDate.length < days - 2 && (
+        <p className="text-[11px] text-white/25 -mt-1">
+          Only {web.byDate.length}d of search data available · earlier dates show no activity yet
+        </p>
       )}
-      {sc && !sc.ok && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
-          <strong>Error:</strong> {sc.error}
-        </div>
-      )}
 
-      {sc?.ok && (() => {
-        const web   = sc.web
-        const image = sc.image
-
-        const chartData = web.byDate.map(r => ({
-          date:        r.keys[0],
-          clicks:      r.clicks,
-          impressions: Math.round(r.impressions / 10),
-        }))
-
-        const byDate  = web.byDate
-        const recent7 = byDate.slice(-7)
-        const prev7   = byDate.slice(-14, -7)
-
-        const r7c   = recent7.reduce((s, r) => s + r.clicks, 0)
-        const p7c   = prev7.reduce((s, r) => s + r.clicks, 0)
-        const r7i   = recent7.reduce((s, r) => s + r.impressions, 0)
-        const p7i   = prev7.reduce((s, r) => s + r.impressions, 0)
-        const r7pos = recent7.length ? recent7.reduce((s, r) => s + r.position, 0) / recent7.length : 0
-        const p7pos = prev7.length   ? prev7.reduce((s, r) => s + r.position, 0)  / prev7.length   : 0
-        const r7ctr = recent7.length ? recent7.reduce((s, r) => s + r.ctr, 0) / recent7.length : 0
-        const p7ctr = prev7.length   ? prev7.reduce((s, r) => s + r.ctr, 0)   / prev7.length   : 0
-
-        const clickSpark = byDate.slice(-7).map(r => r.clicks)
-        const imprSpark  = byDate.slice(-7).map(r => r.impressions)
-        const posSpark   = byDate.slice(-7).map(r => r.position)
-        const ctrSpark   = byDate.slice(-7).map(r => r.ctr * 100)
-
-        // SC country map — convert alpha-3 ("ind") → alpha-2 ("IN") for WorldMap
-        const totalSCClicks   = web.byCountry.reduce((s, r) => s + r.clicks, 0)
-        const scCountryMapData = web.byCountry
-          .map(r => ({
-            code:   SC_A3_TO_A2[r.keys[0].toLowerCase()] ?? r.keys[0].toUpperCase().slice(0, 2),
-            visits: r.clicks,
-            pct:    totalSCClicks > 0 ? (r.clicks / totalSCClicks) * 100 : 0,
-          }))
-          .filter(c => c.code.length === 2)
-        const topSCCountries = scCountryMapData.slice(0, 8)
-        const maxSCPct       = topSCCountries[0]?.pct ?? 1
-
-        // Device donut
-        const deviceDonutData = web.byDevice.map(r => ({
-          name:  r.keys[0].charAt(0).toUpperCase() + r.keys[0].slice(1).toLowerCase(),
-          value: r.clicks,
-        }))
-
-        return (
-          <div className="space-y-5">
-            {/* Stat Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <SparklineCard label="Avg Position"
-                value={web.avgPosition > 0 ? web.avgPosition.toFixed(1) : "—"}
-                change={p7pos > 0 ? -((r7pos - p7pos) / p7pos) * 100 : undefined}
-                data={posSpark.map(v => 100 - v)} color="#a78bfa" gradientId="grad-pos"
-                sub="28 days · lower = better" />
-              <SparklineCard label="Total Clicks" value={fmtNum(web.totalClicks)}
-                change={p7c > 0 ? ((r7c - p7c) / p7c) * 100 : undefined}
-                data={clickSpark} color="#60a5fa" gradientId="grad-clicks" sub="28 days" />
-              <SparklineCard label="Total Impressions" value={fmtNum(web.totalImpressions)}
-                change={p7i > 0 ? ((r7i - p7i) / p7i) * 100 : undefined}
-                data={imprSpark} color="#34d399" gradientId="grad-impr" sub="28 days" />
-              <SparklineCard label="Avg CTR"
-                value={web.totalImpressions > 0 ? (web.avgCtr * 100).toFixed(2) + "%" : "—"}
-                change={p7ctr > 0 ? ((r7ctr - p7ctr) / p7ctr) * 100 : undefined}
-                data={ctrSpark} color="#fbbf24" gradientId="grad-ctr" sub="click-through rate" />
+      {/* Chart + Search Queries */}
+      {chartData.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+          <Card className="lg:col-span-2">
+            <CardHeader title="Clicks & Impressions" sub={`${days} days`} />
+            <div className="p-5 h-56">
+              <SCChart data={chartData} />
             </div>
+            <div className="px-5 pb-4">
+              <p className="text-xs text-white/30">* Impressions scaled ÷10 for chart legibility</p>
+            </div>
+          </Card>
 
-            {/* Chart + Search Queries */}
-            {chartData.length > 0 && (
-              <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-                <Card className="lg:col-span-2">
-                  <CardHeader title="Clicks & Impressions" sub="28 days" />
-                  <div className="p-5 h-56">
-                    <SCChart data={chartData} />
-                  </div>
-                  <div className="px-5 pb-4">
-                    <p className="text-xs text-white/30">* Impressions scaled ÷10 for chart legibility</p>
-                  </div>
-                </Card>
-
-                <Card className="lg:col-span-3">
-                  <CardHeader title="Search Queries" sub="Top 25 · 28 days" />
-                  <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "320px" }}>
-                    <table className="w-full">
-                      <thead>
-                        <tr className="border-b border-[#222]">
-                          <Th>Query</Th>
-                          <Th right>Pos.</Th>
-                          <Th right>Clicks</Th>
-                          <Th right>Impr.</Th>
-                          <Th right>CTR</Th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {web.topQueries.map((r, i) => (
-                          <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                            <Td>
-                              <span className="truncate block max-w-[200px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span>
-                            </Td>
-                            <Td right><PositionBadge pos={r.position} /></Td>
-                            <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(r.clicks)}</span></Td>
-                            <Td right><span className="text-white/50 tabular-nums">{fmtNum(r.impressions)}</span></Td>
-                            <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
-                          </tr>
-                        ))}
-                        {web.topQueries.length === 0 && (
-                          <tr><Td><span className="text-white/35">No query data yet</span></Td></tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-              </div>
-            )}
-
-            {/* Country Map */}
-            <Card>
-              <CardHeader title="Clicks by Country" sub="Google Search · 28 days" />
-              <div className="grid grid-cols-1 lg:grid-cols-5">
-                <div className="lg:col-span-3 p-4" style={{ height: "460px" }}>
-                  <WorldMap countries={scCountryMapData} accentColor="#a78bfa" />
-                </div>
-                <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-3">
-                  {topSCCountries.length === 0 && (
-                    <p className="text-sm text-white/35">No country data yet</p>
-                  )}
-                  {topSCCountries.map((c, i) => (
-                    <CountryRow key={i} code={c.code} pct={c.pct} maxPct={maxSCPct} color="#a78bfa" />
-                  ))}
-                </div>
-              </div>
-            </Card>
-
-            {/* Image Search + Device side by side */}
-            {image.totalImpressions > 0 && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
-                {/* Image Search Performance — colorful stat cards */}
-                <Card className="lg:col-span-2">
-                  <CardHeader title="Image Search Performance" sub="28 days" />
-                  <div className="p-5 grid grid-cols-3 gap-3 mb-1">
-                    {[
-                      { label: "Avg Position",  value: image.avgPosition > 0 ? image.avgPosition.toFixed(1) : "—", color: "#a78bfa" },
-                      { label: "Impressions",   value: fmtNum(image.totalImpressions),                               color: "#34d399" },
-                      { label: "CTR",           value: image.totalImpressions > 0 ? (image.avgCtr * 100).toFixed(2) + "%" : "—", color: "#fbbf24" },
-                    ].map(s => (
-                      <div key={s.label} className="rounded-lg border border-[#222] bg-[#0d0d0d] p-4">
-                        <p className="text-xs text-white/40 mb-2 uppercase tracking-wider">{s.label}</p>
-                        <p className="text-2xl font-bold tabular-nums text-white">{s.value}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <CardHeader title="Image Search Queries" />
-                  <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "240px" }}>
-                    <table className="w-full">
-                      <thead>
-                        <tr className="border-b border-[#222]">
-                          <Th>Query</Th>
-                          <Th right>Pos.</Th>
-                          <Th right>Impr.</Th>
-                          <Th right>CTR</Th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {image.topQueries.map((r, i) => (
-                          <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                            <Td><span className="truncate block max-w-[180px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span></Td>
-                            <Td right><PositionBadge pos={r.position} /></Td>
-                            <Td right><span className="text-white/50 tabular-nums">{fmtNum(r.impressions)}</span></Td>
-                            <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-
-                {/* Device Donut */}
-                {deviceDonutData.length > 0 && (
-                  <DonutChart data={deviceDonutData} title="Device Breakdown" />
-                )}
-              </div>
-            )}
-
-            {/* If no image search data, show device donut alone */}
-            {image.totalImpressions === 0 && deviceDonutData.length > 0 && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <DonutChart data={deviceDonutData} title="Device Breakdown" />
-              </div>
-            )}
-
-            {/* Top Pages */}
-            <Card>
-              <CardHeader title="Top Pages" sub="Web search · 28 days" />
-              <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "340px" }}>
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-[#222]">
-                      <Th>Page</Th>
-                      <Th right>Pos.</Th>
-                      <Th right>Clicks</Th>
-                      <Th right>CTR</Th>
+          <Card className="lg:col-span-3">
+            <CardHeader title="Search Queries" sub={`Top 25 · ${days} days`} />
+            <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "320px" }}>
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-[#222]">
+                    <Th>Query</Th>
+                    <Th right>Pos.</Th>
+                    <Th right>Clicks</Th>
+                    <Th right>Impr.</Th>
+                    <Th right>CTR</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {web.topQueries.map((r, i) => (
+                    <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                      <Td>
+                        <span className="truncate block max-w-[200px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span>
+                      </Td>
+                      <Td right><PositionBadge pos={r.position} /></Td>
+                      <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(r.clicks)}</span></Td>
+                      <Td right><span className="text-white/50 tabular-nums">{fmtNum(r.impressions)}</span></Td>
+                      <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {web.topPages.map((r, i) => (
-                      <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                        <Td mono>{r.keys[0].replace(/^https?:\/\/[^/]+/, "") || "/"}</Td>
-                        <Td right><PositionBadge pos={r.position} /></Td>
-                        <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(r.clicks)}</span></Td>
-                        <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
-                      </tr>
-                    ))}
-                    {web.topPages.length === 0 && (
-                      <tr><Td><span className="text-white/35">No page data yet</span></Td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+                  ))}
+                  {web.topQueries.length === 0 && (
+                    <tr><Td><span className="text-white/35">No query data yet</span></Td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Country Map */}
+      <Card>
+        <CardHeader title="Clicks by Country" sub={`Google Search · ${days} days`} />
+        <div className="grid grid-cols-1 lg:grid-cols-5">
+          <div className="lg:col-span-3 p-4" style={{ height: "460px" }}>
+            <WorldMap countries={scCountryMapData} accentColor="#a78bfa" />
           </div>
-        )
-      })()}
+          <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-3">
+            {topSCCountries.length === 0 && (
+              <p className="text-sm text-white/35">No country data yet</p>
+            )}
+            {topSCCountries.map((c, i) => (
+              <CountryRow key={i} code={c.code} pct={c.pct} maxPct={maxSCPct} color="#a78bfa" />
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {/* Image Search + Device side by side */}
+      {image.totalImpressions > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+          <Card className="lg:col-span-2">
+            <CardHeader title="Image Search Performance" sub={`${days} days`} />
+            <div className="p-5 grid grid-cols-3 gap-3 mb-1">
+              {[
+                { label: "Avg Position",  value: image.avgPosition > 0 ? image.avgPosition.toFixed(1) : "—" },
+                { label: "Impressions",   value: fmtNum(image.totalImpressions) },
+                { label: "CTR",           value: image.totalImpressions > 0 ? (image.avgCtr * 100).toFixed(2) + "%" : "—" },
+              ].map(s => (
+                <div key={s.label} className="rounded-lg border border-[#222] bg-[#0d0d0d] p-4">
+                  <p className="text-xs text-white/40 mb-2 uppercase tracking-wider">{s.label}</p>
+                  <p className="text-2xl font-bold tabular-nums text-white">{s.value}</p>
+                </div>
+              ))}
+            </div>
+            <CardHeader title="Image Search Queries" />
+            <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "240px" }}>
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-[#222]">
+                    <Th>Query</Th>
+                    <Th right>Pos.</Th>
+                    <Th right>Impr.</Th>
+                    <Th right>CTR</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {image.topQueries.map((r, i) => (
+                    <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                      <Td><span className="truncate block max-w-[180px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span></Td>
+                      <Td right><PositionBadge pos={r.position} /></Td>
+                      <Td right><span className="text-white/50 tabular-nums">{fmtNum(r.impressions)}</span></Td>
+                      <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          {deviceDonutData.length > 0 && (
+            <DonutChart data={deviceDonutData} title="Device Breakdown" />
+          )}
+        </div>
+      )}
+
+      {image.totalImpressions === 0 && deviceDonutData.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <DonutChart data={deviceDonutData} title="Device Breakdown" />
+        </div>
+      )}
+
+      {/* Top Pages */}
+      <Card>
+        <CardHeader title="Top Pages" sub={`Web search · ${days} days`} />
+        <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "340px" }}>
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-[#222]">
+                <Th>Page</Th>
+                <Th right>Pos.</Th>
+                <Th right>Clicks</Th>
+                <Th right>CTR</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {web.topPages.map((r, i) => (
+                <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                  <Td mono>{r.keys[0].replace(/^https?:\/\/[^/]+/, "") || "/"}</Td>
+                  <Td right><PositionBadge pos={r.position} /></Td>
+                  <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(r.clicks)}</span></Td>
+                  <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
+                </tr>
+              ))}
+              {web.topPages.length === 0 && (
+                <tr><Td><span className="text-white/35">No page data yet</span></Td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </section>
   )
 }
 
 // ─── Section 3: Bing ──────────────────────────────────────────────────────────
 
-async function BingSection() {
+async function BingSection({ days }: { days: number }) {
   const bing = await cachedBing()
+  const periodLabel = `${days}d`
 
-  // Split 90d into current 30d and prior 30d for change %
-  const sorted   = bing ? [...bing.queryStats].sort((a, b) => a.date.localeCompare(b.date)) : []
-  const curr30   = sorted.slice(-30)
-  const prev30   = sorted.slice(-60, -30)
+  // Bing API always returns 90 days; slice to selected window + prior window for change %
+  const cappedDays = Math.min(days, 90)
+  const sorted  = bing ? [...bing.queryStats].sort((a, b) => a.date.localeCompare(b.date)) : []
+  const currSlice = sorted.slice(-cappedDays)
+  const prevSlice = sorted.slice(-cappedDays * 2, -cappedDays)
 
-  const currClicks = curr30.reduce((a, r) => a + r.clicks, 0)
-  const prevClicks = prev30.reduce((a, r) => a + r.clicks, 0)
-  const currImpr   = curr30.reduce((a, r) => a + r.impressions, 0)
-  const prevImpr   = prev30.reduce((a, r) => a + r.impressions, 0)
+  const currClicks = currSlice.reduce((a, r) => a + r.clicks, 0)
+  const prevClicks = prevSlice.reduce((a, r) => a + r.clicks, 0)
+  const currImpr   = currSlice.reduce((a, r) => a + r.impressions, 0)
+  const prevImpr   = prevSlice.reduce((a, r) => a + r.impressions, 0)
 
-  const currPos = curr30.filter(r => r.avgPosition > 0).length > 0
-    ? curr30.filter(r => r.avgPosition > 0).reduce((a, r) => a + r.avgPosition, 0) / curr30.filter(r => r.avgPosition > 0).length : 0
-  const prevPos = prev30.filter(r => r.avgPosition > 0).length > 0
-    ? prev30.filter(r => r.avgPosition > 0).reduce((a, r) => a + r.avgPosition, 0) / prev30.filter(r => r.avgPosition > 0).length : 0
+  const currPosDays = currSlice.filter(r => r.avgPosition > 0)
+  const prevPosDays = prevSlice.filter(r => r.avgPosition > 0)
+  const currPos = currPosDays.length > 0 ? currPosDays.reduce((a, r) => a + r.avgPosition, 0) / currPosDays.length : 0
+  const prevPos = prevPosDays.length > 0 ? prevPosDays.reduce((a, r) => a + r.avgPosition, 0) / prevPosDays.length : 0
 
   const crawledPages = bing ? bing.pageInfo.filter(p => p.lastCrawled).length : 0
 
-  const clickChange  = changePct(currClicks, prevClicks)
-  const imprChange   = changePct(currImpr, prevImpr)
+  const clickChange = changePct(currClicks, prevClicks)
+  const imprChange  = changePct(currImpr, prevImpr)
   // Position: lower is better, so flip sign for badge
-  const posChange    = prevPos > 0 ? -changePct(currPos, prevPos) : 0
+  const posChange   = prevPos > 0 ? -changePct(currPos, prevPos) : 0
 
-  const clickSpark = curr30.map(r => r.clicks)
-  const imprSpark  = curr30.map(r => r.impressions)
-  const posSpark   = curr30.map(r => r.avgPosition)
+  const clickSpark = currSlice.map(r => r.clicks)
+  const imprSpark  = currSlice.map(r => r.impressions)
+  const posSpark   = currSlice.map(r => r.avgPosition)
 
   return (
     <section className="space-y-5">
@@ -667,29 +689,32 @@ async function BingSection() {
           <SparklineCard
             label="Bing Clicks"
             value={fmtNum(currClicks)}
-            change={prevClicks > 0 ? clickChange : undefined}
+            change={prevClicks > 0 ? clickChange : currClicks > 0 ? null : undefined}
             data={clickSpark}
             color="#34d399"
             gradientId="bing-clicks"
-            sub="organic clicks · 30d"
+            sub={`organic clicks · ${days}d`}
+            periodLabel={periodLabel}
           />
           <SparklineCard
             label="Bing Impressions"
             value={fmtNum(currImpr)}
-            change={prevImpr > 0 ? imprChange : undefined}
+            change={prevImpr > 0 ? imprChange : currImpr > 0 ? null : undefined}
             data={imprSpark}
             color="#818cf8"
             gradientId="bing-impr"
-            sub="search impressions · 30d"
+            sub={`search impressions · ${days}d`}
+            periodLabel={periodLabel}
           />
           <SparklineCard
             label="Avg Position"
             value={currPos > 0 ? currPos.toFixed(1) : "—"}
-            change={prevPos > 0 ? posChange : undefined}
+            change={prevPos > 0 ? posChange : currPos > 0 ? null : undefined}
             data={posSpark}
             color="#fbbf24"
             gradientId="bing-pos"
             sub="avg rank on Bing"
+            periodLabel={periodLabel}
           />
           <SparklineCard
             label="Pages Crawled"
@@ -778,31 +803,44 @@ async function BingSection() {
 
 export const dynamic = "force-dynamic"
 
-export default function Home() {
+export default async function Home({ searchParams }: { searchParams: Promise<{ range?: string }> }) {
+  const { range = "7d" } = await searchParams
+  const days = range === "90d" ? 90 : range === "30d" ? 30 : range === "15d" ? 15 : 7
+
+  // Pre-warm the other three range caches so switching feels instant.
+  // These are fire-and-forget: if already cached they resolve immediately; if cold
+  // they populate in the background before the user clicks a different range.
+  ;([7, 15, 30, 90] as const).filter(d => d !== days).forEach(d => {
+    cachedCloudflare(d).catch(() => {})
+    cachedSC(d).catch(() => {})
+  })
+
   return (
     <div className="min-h-screen bg-[#0a0a0a]">
       <header className="sticky top-0 z-40 border-b border-[#1a1a1a]"
         style={{ background: "rgba(10,10,10,0.85)", backdropFilter: "blur(20px)" }}>
-        <div className="max-w-[1400px] mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-lg bg-white/[0.07] border border-white/[0.1] flex items-center justify-center">
-              <span className="text-xs font-bold text-white/60">W</span>
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold text-white/80 tracking-tight leading-none">weddingtheory.co.in</h1>
-              <p className="text-xs text-white/35 mt-0.5">Analytics Dashboard</p>
-            </div>
+        <div className="max-w-[1400px] mx-auto px-6 py-4 grid grid-cols-3 items-center">
+          <h1 className="text-base font-semibold text-white/80 tracking-tight">Wedding Theory Analytics</h1>
+          <div className="flex justify-center">
+            <DateFilter current={range} />
           </div>
-          <DateFilter label="Last 7 / 28 / 90 days" />
+          <div className="flex justify-end">
+            <button
+              className="w-8 h-8 rounded-full bg-white/[0.07] border border-white/[0.1] flex items-center justify-center hover:bg-white/[0.12] transition-colors"
+              aria-label="Account"
+            >
+              <User className="w-4 h-4 text-white/50" />
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="max-w-[1400px] mx-auto px-6 py-8 space-y-14">
-        <Suspense fallback={<SectionSkeleton />}><CloudflareSection /></Suspense>
-        <Suspense fallback={<SectionSkeleton />}><SearchConsoleSection /></Suspense>
-        <Suspense fallback={<SectionSkeleton />}><BingSection /></Suspense>
+        <Suspense fallback={<SectionSkeleton />}><CloudflareSection days={days} /></Suspense>
+        <Suspense fallback={<SectionSkeleton />}><SearchConsoleSection days={days} /></Suspense>
+        <Suspense fallback={<SectionSkeleton />}><BingSection days={days} /></Suspense>
         <p className="text-xs text-white/25 text-center pb-6">
-          Cloudflare: 7-day window · Google Search Console: 28-day window · Bing: 90-day window
+          Showing {days}-day window · Bing capped at 90 days
         </p>
       </main>
     </div>

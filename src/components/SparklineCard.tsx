@@ -7,11 +7,12 @@ import { cn } from "@/lib/utils"
 interface SparklineCardProps {
   label: string
   value: string
-  change?: number
+  change?: number | null  // undefined = hide, null = "New" (no prior data), number = show %
   data?: number[]
   color?: string
   gradientId: string
   sub?: string
+  periodLabel?: string
 }
 
 export function SparklineCard({
@@ -22,11 +23,13 @@ export function SparklineCard({
   color = "#818cf8",
   gradientId,
   sub,
+  periodLabel = "7d",
 }: SparklineCardProps) {
   const sparkData = data.map((v, i) => ({ i, v }))
-  const hasChange = change !== undefined
-  const isPositive = (change ?? 0) > 0
-  const isNegative = (change ?? 0) < 0
+  const isNew      = change === null
+  const hasChange  = typeof change === "number"
+  const isPositive = hasChange && change > 0
+  const isNegative = hasChange && change < 0
 
   return (
     <div className="rounded-xl border border-[#222] bg-[#111] flex flex-col overflow-hidden group transition-colors duration-200 hover:border-[#333]">
@@ -49,12 +52,20 @@ export function SparklineCard({
             >
               {isPositive ? <TrendingUp className="w-3 h-3" /> : isNegative ? <TrendingDown className="w-3 h-3" /> : <Minus className="w-3 h-3" />}
               {isPositive ? "+" : ""}
-              {change!.toFixed(1)}%
+              {change.toFixed(1)}%
             </span>
-            <span className="text-[11px] text-white/30">vs prev 7d</span>
+            <span className="text-[11px] text-white/30">vs prev {periodLabel}</span>
           </div>
         )}
-        {sub && !hasChange && (
+        {isNew && (
+          <div className="flex items-center gap-1.5 mt-2.5">
+            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400">
+              New
+            </span>
+            <span className="text-[11px] text-white/30">no prior data</span>
+          </div>
+        )}
+        {sub && !hasChange && !isNew && (
           <p className="text-[11px] text-white/30 mt-1.5">{sub}</p>
         )}
       </div>

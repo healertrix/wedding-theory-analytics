@@ -51,10 +51,10 @@ export interface DayGroup {
 export interface AdaptivePath   { count: number; dimensions: { clientRequestPath: string; clientRequestHTTPMethodName: string } }
 export interface AdaptiveDevice { count: number; dimensions: { clientDeviceType: string } }
 
-// ─── Types — RUM (confirmed field names from schema introspection) ─────────────
+// ─── Types — RUM ─────────────────────────────────────────────────────────────
 
 export interface RumDay {
-  count: number            // page views (one event per page load)
+  count: number
   sum: { visits: number }
   dimensions: { date: string }
 }
@@ -83,7 +83,6 @@ export interface RumVitalsDay {
   dimensions: { date: string }
 }
 
-// countryName, userAgentBrowser, userAgentOS, deviceType, requestPath, refererHost are the real field names
 export interface RumCountry { count: number; sum: { visits: number }; dimensions: { countryName: string } }
 export interface RumBrowser { count: number; sum: { visits: number }; dimensions: { userAgentBrowser: string } }
 export interface RumOS      { count: number; sum: { visits: number }; dimensions: { userAgentOS: string } }
@@ -110,20 +109,28 @@ export interface CloudflareData {
 
 // ─── Main fetch ───────────────────────────────────────────────────────────────
 
-export async function getCloudflareData(): Promise<CloudflareData | null> {
+export async function getCloudflareData(days: number = 7): Promise<CloudflareData | null> {
   const zoneId = process.env.Zone_ID?.trim()
   const token  = process.env.Cloudflare_api?.trim()
   if (!zoneId || !token) return null
 
-  const today  = fmtDate(new Date())
-  const past   = new Date(); past.setDate(past.getDate() - 14)
-  const past14 = fmtDate(past)
+  const today   = fmtDate(new Date())
+  // Fetch 2× the selected window so we have current period + previous period for WoW.
+  // RUM API hard limit is ~91 days; cap the RUM lookback separately so large windows don't error.
+  const totalDays    = days * 2
+  const rumTotalDays = Math.min(totalDays, 91)
+  const pastAll    = new Date(); pastAll.setDate(pastAll.getDate() - totalDays)
+  const pastRumAll = new Date(); pastRumAll.setDate(pastRumAll.getDate() - rumTotalDays)
+  const pastCurr   = new Date(); pastCurr.setDate(pastCurr.getDate() - days)
+  const pastAllStr    = fmtDate(pastAll)
+  const pastRumAllStr = fmtDate(pastRumAll)
+  const pastCurrStr   = fmtDate(pastCurr)
 
-  // ── Step 1: account ID from zone (no Account:Read perm needed) ──────────────
+  // ── Step 1: account ID from zone ─────────────────────────────────────────
   const zoneResp = await rest(token, `/zones/${zoneId}`)
   const accountId: string | undefined = zoneResp?.result?.account?.id
 
-  // ── Step 2: discover siteTag via GraphQL (no Web Analytics:Read perm needed) ─
+  // ── Step 2: discover siteTag ─────────────────────────────────────────────
   let siteTag: string | undefined
   if (accountId) {
     const disc = await gql(token, `{
@@ -131,7 +138,7 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
         accounts(filter: { accountTag: "${accountId}" }) {
           rumPageloadEventsAdaptiveGroups(
             limit: 1
-            filter: { AND: [{ date_geq: "${past14}" }, { date_leq: "${today}" }] }
+            filter: { AND: [{ date_geq: "${pastRumAllStr}" }, { date_leq: "${today}" }] }
             orderBy: [count_DESC]
           ) { dimensions { siteTag } }
         }
@@ -142,18 +149,26 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
   }
 
   const errors: unknown[] = []
-  const f14 = `AND: [{ date_geq: "${past14}" }, { date_leq: "${today}" }]`
-  const fRum = siteTag
-    ? `AND: [{ date_geq: "${past14}" }, { date_leq: "${today}" }, { siteTag: "${siteTag}" }]`
-    : `AND: [{ date_geq: "${past14}" }, { date_leq: "${today}" }]`
 
-  // ── Query 1: 14-day HTTP analytics (14 days for % change calc) ─────────────
+  // Two filters:
+  // fAll  — full 2× window, for daily time-series (WoW split done in UI)
+  // fCurr — current window only, for aggregate breakdowns (countries, browsers, etc.)
+  const fAll  = `AND: [{ date_geq: "${pastAllStr}" }, { date_leq: "${today}" }]`
+  const fCurr = `AND: [{ date_geq: "${pastCurrStr}" }, { date_leq: "${today}" }]`
+  const fRumAll = siteTag
+    ? `AND: [{ date_geq: "${pastRumAllStr}" }, { date_leq: "${today}" }, { siteTag: "${siteTag}" }]`
+    : `AND: [{ date_geq: "${pastRumAllStr}" }, { date_leq: "${today}" }]`
+  const fRumCurr = siteTag
+    ? `AND: [{ date_geq: "${pastCurrStr}" }, { date_leq: "${today}" }, { siteTag: "${siteTag}" }]`
+    : `AND: [{ date_geq: "${pastCurrStr}" }, { date_leq: "${today}" }]`
+
+  // ── Query 1: HTTP daily (full 2× window for WoW calc) ─────────────────────
   const q1 = `{
     viewer {
       zones(filter: { zoneTag: "${zoneId}" }) {
         httpRequests1dGroups(
-          limit: 14
-          filter: { ${f14} }
+          limit: ${totalDays}
+          filter: { ${fAll} }
           orderBy: [date_ASC]
         ) {
           sum {
@@ -174,7 +189,7 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
     }
   }`
 
-  // ── Query 2: adaptive groups (today only — 1-day hard limit) ───────────────
+  // ── Query 2: adaptive groups (today only — 1-day hard limit) ──────────────
   const q2 = `{
     viewer {
       zones(filter: { zoneTag: "${zoneId}" }) {
@@ -192,40 +207,40 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
     }
   }`
 
-  // ── Query 3: RUM — all datasets with correct schema field names ─────────────
+  // ── Query 3: RUM ─────────────────────────────────────────────────────────
   const rumQ = accountId ? `{
     viewer {
       accounts(filter: { accountTag: "${accountId}" }) {
         rumDaily: rumPageloadEventsAdaptiveGroups(
-          limit: 14 filter: { ${fRum} } orderBy: [date_ASC]
+          limit: ${rumTotalDays} filter: { ${fRumAll} } orderBy: [date_ASC]
         ) { count sum { visits } dimensions { date } }
 
         rumCountries: rumPageloadEventsAdaptiveGroups(
-          limit: 20 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 20 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { countryName } }
 
         rumBrowsers: rumPageloadEventsAdaptiveGroups(
-          limit: 10 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 10 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { userAgentBrowser } }
 
         rumOS: rumPageloadEventsAdaptiveGroups(
-          limit: 8 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 8 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { userAgentOS } }
 
         rumDevices: rumPageloadEventsAdaptiveGroups(
-          limit: 5 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 5 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { deviceType } }
 
         rumPaths: rumPageloadEventsAdaptiveGroups(
-          limit: 10 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 10 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { requestPath } }
 
         rumReferers: rumPageloadEventsAdaptiveGroups(
-          limit: 10 filter: { ${fRum} } orderBy: [count_DESC]
+          limit: 10 filter: { ${fRumCurr} } orderBy: [count_DESC]
         ) { count sum { visits } dimensions { refererHost } }
 
         rumPerf: rumPerformanceEventsAdaptiveGroups(
-          limit: 7 filter: { ${fRum} } orderBy: [date_ASC]
+          limit: ${days} filter: { ${fRumCurr} } orderBy: [date_ASC]
         ) {
           count
           quantiles {
@@ -237,7 +252,7 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
         }
 
         rumVitals: rumWebVitalsEventsAdaptiveGroups(
-          limit: 7 filter: { ${fRum} } orderBy: [date_ASC]
+          limit: ${days} filter: { ${fRumCurr} } orderBy: [date_ASC]
         ) {
           count
           quantiles {
@@ -254,8 +269,11 @@ export async function getCloudflareData(): Promise<CloudflareData | null> {
     }
   }` : null
 
-  const promises = [gql(token, q1), gql(token, q2), rumQ ? gql(token, rumQ) : Promise.resolve(null)]
-  const [j1, j2, j3] = await Promise.all(promises)
+  const [j1, j2, j3] = await Promise.all([
+    gql(token, q1),
+    gql(token, q2),
+    rumQ ? gql(token, rumQ) : Promise.resolve(null),
+  ])
 
   if (j1?.errors) errors.push(...(Array.isArray(j1.errors) ? j1.errors : [j1.errors]))
   if (j2?.errors) errors.push(...(Array.isArray(j2.errors) ? j2.errors : [j2.errors]))

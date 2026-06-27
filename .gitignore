@@ -78,3 +78,5 @@ desktop.ini
 .turbo/
 /dist/
 google-credentials.json
+/design
+/issue
