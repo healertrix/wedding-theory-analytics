@@ -13,8 +13,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "weddingtheory.co.in — Analytics",
-  description: "Website analytics dashboard",
+  title: "Wedding Theory — Analytics",
+  description: "Internal analytics dashboard for weddingtheory.co.in",
+  icons: {
+    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>",
+  },
 };
 
 export default function RootLayout({

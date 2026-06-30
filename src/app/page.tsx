@@ -9,6 +9,7 @@ import { SparklineCard } from "@/components/SparklineCard"
 import { SingleLineChart, SCChart } from "@/components/TrafficChart"
 import { DonutChartsRow, DonutChart } from "@/components/DonutCharts"
 import { WorldMap } from "@/components/WorldMap"
+import { GeoSectionLoader } from "@/components/GeoSectionLoader"
 
 function cachedCloudflare(days: number) {
   return unstable_cache(getCloudflareData, ["cloudflare", String(days)], { revalidate: 3600 })(days)
@@ -834,9 +835,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ r
         <Suspense fallback={<SectionSkeleton />}><CloudflareSection days={days} /></Suspense>
         <Suspense fallback={<SectionSkeleton />}><SearchConsoleSection days={days} /></Suspense>
         <Suspense fallback={<SectionSkeleton />}><BingSection days={days} /></Suspense>
-        <p className="text-xs text-white/25 text-center pb-6">
-          Showing {days}-day window · Bing capped at 90 days
-        </p>
+        <Suspense fallback={<SectionSkeleton />}><GeoSectionLoader days={days} /></Suspense>
       </main>
     </div>
   )
