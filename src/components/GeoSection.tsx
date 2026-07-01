@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useRef } from "react"
+import { useState, useRef, useMemo } from "react"
 import { AreaChart, Area, ResponsiveContainer } from "recharts"
-import { TrendingUp, TrendingDown, Search, X } from "lucide-react"
+import { TrendingUp, TrendingDown, Search, X, ChevronRight } from "lucide-react"
 import { computeModelSummary, getDomain } from "@/lib/geo"
-import type { GeoRunResult, GeoScoreSnapshot, ModelKey } from "@/lib/geo"
+import type { GeoRunResult, GeoScoreSnapshot, ModelKey, PromptResult } from "@/lib/geo"
 
 const MODEL_META: Record<ModelKey, { label: string; color: string; dim: string; gradientId: string }> = {
   chatgpt: { label: "ChatGPT", color: "#10a37f", dim: "rgba(16,163,127,0.12)", gradientId: "geo-chatgpt" },
@@ -180,78 +180,176 @@ function ModelCard({
   )
 }
 
-// ── Sources Card ──────────────────────────────────────────────────────────────
+// ── Unified Sources Table ─────────────────────────────────────────────────────
+// Aggregates raw citations (every prompt × every model, undeduped) by domain,
+// so "count" reflects how many times a domain was actually cited overall —
+// not capped at the number of AI tools.
 
-function SourcesCard({ model, sources }: { model: ModelKey; sources: import("@/lib/geo").GeoSource[] }) {
-  const m = MODEL_META[model]
-  const [open, setOpen]   = useState(false)
-  const [query, setQuery] = useState("")
-  const inputRef          = useRef<HTMLInputElement>(null)
+type ModelCounts = Record<ModelKey, number>
 
-  function toggle() {
-    if (open) { setOpen(false); setQuery("") }
-    else      { setOpen(true); setTimeout(() => inputRef.current?.focus(), 10) }
+interface ArticleAgg {
+  url:      string
+  title:    string
+  total:    number
+  perModel: ModelCounts
+}
+
+interface DomainAgg {
+  domain:   string
+  total:    number
+  perModel: ModelCounts
+  articles: ArticleAgg[]
+}
+
+function emptyCounts(): ModelCounts {
+  return { chatgpt: 0, gemini: 0, claude: 0 }
+}
+
+function aggregateSources(prompts: PromptResult[]): DomainAgg[] {
+  const domains = new Map<string, { perModel: ModelCounts; articles: Map<string, { title: string; perModel: ModelCounts }> }>()
+
+  for (const prompt of prompts) {
+    for (const model of MODELS) {
+      for (const s of prompt.models[model].sources) {
+        const domain = getDomain(s.url)
+        if (!domains.has(domain)) domains.set(domain, { perModel: emptyCounts(), articles: new Map() })
+        const d = domains.get(domain)!
+        d.perModel[model]++
+
+        if (!d.articles.has(s.url)) d.articles.set(s.url, { title: s.title, perModel: emptyCounts() })
+        d.articles.get(s.url)!.perModel[model]++
+      }
+    }
   }
 
+  const result: DomainAgg[] = Array.from(domains.entries()).map(([domain, d]) => {
+    const total = d.perModel.chatgpt + d.perModel.gemini + d.perModel.claude
+    const articles: ArticleAgg[] = Array.from(d.articles.entries())
+      .map(([url, a]) => ({
+        url, title: a.title, perModel: a.perModel,
+        total: a.perModel.chatgpt + a.perModel.gemini + a.perModel.claude,
+      }))
+      .sort((a, b) => b.total - a.total)
+    return { domain, total, perModel: d.perModel, articles }
+  })
+
+  return result.sort((a, b) => b.total - a.total)
+}
+
+function UnifiedSourcesTable({ prompts }: { prompts: PromptResult[] }) {
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [query, setQuery]           = useState("")
+  const [expanded, setExpanded]     = useState<Set<string>>(new Set())
+  const inputRef                    = useRef<HTMLInputElement>(null)
+
+  const domains = useMemo(() => aggregateSources(prompts), [prompts])
+
   const filtered = query.trim()
-    ? sources.filter(s =>
-        getDomain(s.url).toLowerCase().includes(query.toLowerCase()) ||
-        s.title.toLowerCase().includes(query.toLowerCase())
-      )
-    : sources
+    ? domains.filter(d => d.domain.toLowerCase().includes(query.trim().toLowerCase()))
+    : domains
+
+  function toggleSearch() {
+    if (searchOpen) { setSearchOpen(false); setQuery("") }
+    else            { setSearchOpen(true); setTimeout(() => inputRef.current?.focus(), 10) }
+  }
+
+  function toggleExpand(domain: string) {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(domain)) next.delete(domain)
+      else next.add(domain)
+      return next
+    })
+  }
 
   return (
-    <Card className="w-full">
-      <div className="px-5 py-3.5 border-b border-[#1a1a1a] flex items-center gap-3">
-        <span className="flex items-center justify-center w-7 h-7 rounded-lg shrink-0" style={{ background: m.dim, color: m.color }}>
-          <ModelLogo model={model} size={14} />
-        </span>
-        <span className="text-xs font-semibold uppercase tracking-[0.1em] shrink-0" style={{ color: m.color }}>{m.label}</span>
-        <span className="text-xs text-white/30 shrink-0">{sources.length} sources</span>
+    <Card className="w-full overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-[#1a1a1a] flex items-center gap-3 min-w-0">
+        <span className="text-xs font-semibold uppercase tracking-[0.1em] text-white/55 shrink-0">Sources</span>
+        <span className="text-xs text-white/30 shrink-0 truncate">{domains.length} domains</span>
 
-        <div className="ml-auto flex items-center">
-          <div className={`flex items-center gap-2 overflow-hidden transition-all duration-200 ease-in-out
-            ${open ? "w-48 px-3 py-1.5 bg-[#0d0d0d] border border-[#333] rounded-l-lg" : "w-0 p-0 border-0"}`}>
+        <div className="ml-auto relative flex items-center h-8 shrink-0">
+          <div className={`absolute right-0 top-0 h-8 flex items-center gap-2 overflow-hidden transition-all duration-300 ease-out
+            ${searchOpen
+              ? "w-[calc(9rem+2rem)] sm:w-[calc(12rem+2rem)] pl-3 pr-9 bg-[#0d0d0d] border border-[#333] rounded-lg"
+              : "w-8 border-0"}`}>
             <input
               ref={inputRef}
               type="text"
-              placeholder="Search sources…"
+              placeholder="Search…"
               value={query}
               onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => e.key === "Escape" && toggle()}
-              className="bg-transparent text-xs text-white/65 placeholder-white/25 outline-none w-full min-w-0"
+              onKeyDown={e => e.key === "Escape" && toggleSearch()}
+              tabIndex={searchOpen ? 0 : -1}
+              className={`bg-transparent text-xs text-white/65 placeholder-white/25 outline-none w-full min-w-0 transition-opacity duration-150
+                ${searchOpen ? "opacity-100 delay-100" : "opacity-0"}`}
             />
-            {query && (
+            {query && searchOpen && (
               <button onClick={() => setQuery("")} className="text-white/25 hover:text-white/55 transition-colors shrink-0">
                 <X className="w-3 h-3" />
               </button>
             )}
           </div>
           <button
-            onClick={toggle}
-            className={`flex items-center justify-center w-8 h-8 transition-colors
-              ${open
-                ? "bg-[#0d0d0d] border border-l-0 border-[#333] rounded-r-lg text-white/60 hover:text-white/80"
-                : "rounded-lg text-white/30 hover:text-white/60 hover:bg-white/[0.06]"}`}
+            onClick={toggleSearch}
+            className="relative z-10 flex items-center justify-center w-8 h-8 shrink-0 text-white/40 hover:text-white/75 transition-colors"
           >
-            {open ? <X className="w-3.5 h-3.5" /> : <Search className="w-3.5 h-3.5" />}
+            {searchOpen ? <X className="w-4 h-4" strokeWidth={2.5} /> : <Search className="w-4 h-4" strokeWidth={2.5} />}
           </button>
         </div>
       </div>
 
-      <div className="px-5 py-4 flex flex-col gap-2 overflow-y-auto max-h-96 thin-scroll">
-        {sources.length === 0 && <p className="text-sm text-white/25 py-4 text-center">No sources returned by this model</p>}
-        {sources.length > 0 && filtered.length === 0 && <p className="text-sm text-white/25 py-4 text-center">No match for &ldquo;{query}&rdquo;</p>}
-        {filtered.map((s, i) => (
-          <a key={i} href={s.url} target="_blank" rel="noopener noreferrer"
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-[#242424] bg-[#161616] hover:bg-[#1e1e1e] hover:border-[#333] transition-colors group shrink-0"
-          >
-            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: m.color, opacity: 0.7 }} />
-            <span className="text-sm text-white/60 group-hover:text-white/85 transition-colors font-medium shrink-0">{getDomain(s.url)}</span>
-            {s.title && s.title !== getDomain(s.url) && <span className="text-xs text-white/25 truncate">{s.title}</span>}
-            <span className="ml-auto text-[11px] text-white/20 group-hover:text-white/40 transition-colors shrink-0">↗</span>
-          </a>
-        ))}
+      <div className="px-5 py-2">
+        {domains.length === 0 && <p className="text-sm text-white/25 py-6 text-center">No sources returned by any model</p>}
+        {domains.length > 0 && filtered.length === 0 && <p className="text-sm text-white/25 py-6 text-center">No match for &ldquo;{query}&rdquo;</p>}
+
+        <div className="flex flex-col divide-y divide-[#1a1a1a] max-h-[29rem] overflow-y-auto thin-scroll pr-1">
+          {filtered.map(d => {
+            const isOpen = expanded.has(d.domain)
+            return (
+              <div key={d.domain} className="min-w-0">
+                <button onClick={() => toggleExpand(d.domain)} className="w-full flex items-center gap-2.5 sm:gap-3 py-3 text-left group min-w-0">
+                  <ChevronRight className={`w-3.5 h-3.5 text-white/25 shrink-0 transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`} />
+                  <span className="text-sm text-white/70 group-hover:text-white/90 transition-colors font-medium truncate min-w-0">{d.domain}</span>
+                  <span className="text-xs text-white/30 font-mono tabular-nums shrink-0">{d.total}×</span>
+                  <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                    {MODELS.filter(m => d.perModel[m] > 0).map(m => (
+                      <span key={m} title={`${MODEL_META[m].label}: cited ${d.perModel[m]}×`}
+                        className="flex items-center justify-center w-5 h-5 rounded"
+                        style={{ color: MODEL_META[m].color }}>
+                        <ModelLogo model={m} size={13} />
+                      </span>
+                    ))}
+                  </div>
+                </button>
+
+                <div className="grid transition-all duration-300 ease-in-out" style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}>
+                  <div className="overflow-hidden">
+                    <div className={`flex flex-col gap-1.5 pl-6 pr-0 transition-opacity duration-200 ${isOpen ? "opacity-100 pb-3" : "opacity-0"}`}>
+                      {d.articles.map(a => (
+                        <a key={a.url} href={a.url} target="_blank" rel="noopener noreferrer"
+                          className="flex items-center gap-2.5 sm:gap-3 px-3 py-2 rounded-lg border border-[#242424] bg-[#161616] hover:bg-[#1e1e1e] hover:border-[#333] transition-colors group/article min-w-0"
+                        >
+                          <span className="text-xs text-white/55 group-hover/article:text-white/80 transition-colors truncate min-w-0">{a.title}</span>
+                          <span className="text-[11px] text-white/25 font-mono tabular-nums shrink-0">{a.total}×</span>
+                          <div className="ml-auto flex items-center gap-1 shrink-0">
+                            {MODELS.filter(m => a.perModel[m] > 0).map(m => (
+                              <span key={m} title={`${MODEL_META[m].label}: ${a.perModel[m]}×`}
+                                className="flex items-center justify-center w-4 h-4"
+                                style={{ color: MODEL_META[m].color }}>
+                                <ModelLogo model={m} size={11} />
+                              </span>
+                            ))}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </Card>
   )
@@ -296,13 +394,6 @@ export function GeoSection({
       </section>
     )
   }
-
-  // Sources from the latest full run
-  const latestSummaries = latestRun ? {
-    chatgpt: computeModelSummary("chatgpt", latestRun),
-    gemini:  computeModelSummary("gemini",  latestRun),
-    claude:  computeModelSummary("claude",  latestRun),
-  } : null
 
   return (
     <section className="space-y-5">
@@ -360,9 +451,7 @@ export function GeoSection({
       )}
 
       {/* Sources — always latest run */}
-      {latestSummaries && MODELS.map(model => (
-        <SourcesCard key={model} model={model} sources={latestSummaries[model].sources} />
-      ))}
+      {latestRun && <UnifiedSourcesTable prompts={latestRun.prompts} />}
     </section>
   )
 }
