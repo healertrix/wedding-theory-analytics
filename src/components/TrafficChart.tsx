@@ -76,7 +76,7 @@ export function SingleLineChart({
 }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <LineChart data={data} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
+      <LineChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal vertical={false} />
         <XAxis
           dataKey="date"
@@ -91,7 +91,7 @@ export function SingleLineChart({
           axisLine={false}
           tickLine={false}
           tickFormatter={fmt}
-          width={38}
+          width={44}
         />
         <Tooltip content={<ChartTooltip />} cursor={{ stroke: "rgba(255,255,255,0.07)", strokeWidth: 1 }} />
         <Line
@@ -117,7 +117,7 @@ export interface SCChartDataPoint {
 export function SCChart({ data }: { data: SCChartDataPoint[] }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <LineChart data={data} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
+      <LineChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal vertical={false} />
         <XAxis
           dataKey="date"
@@ -128,7 +128,7 @@ export function SCChart({ data }: { data: SCChartDataPoint[] }) {
           dy={6}
           interval="preserveStartEnd"
         />
-        <YAxis tick={AXIS_STYLE} axisLine={false} tickLine={false} tickFormatter={fmt} width={38} />
+        <YAxis tick={AXIS_STYLE} axisLine={false} tickLine={false} tickFormatter={fmt} width={44} />
         <Tooltip content={<ChartTooltip />} cursor={{ stroke: "rgba(255,255,255,0.07)", strokeWidth: 1 }} />
         <Legend content={<ChartLegend />} />
         <Line type="monotone" dataKey="impressions" name="Impressions" stroke="#a78bfa" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: "#a78bfa", strokeWidth: 0 }} />

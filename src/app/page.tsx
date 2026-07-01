@@ -9,6 +9,7 @@ import { SingleLineChart, SCChart } from "@/components/TrafficChart"
 import { DonutChartsRow, DonutChart } from "@/components/DonutCharts"
 import { WorldMap } from "@/components/WorldMap"
 import { GeoSectionLoader } from "@/components/GeoSectionLoader"
+import { computeDailyPerformanceScore } from "@/lib/webvitals"
 
 function cachedCloudflare(days: number) {
   return unstable_cache(getCloudflareData, ["cloudflare", String(days)], { revalidate: 3600 })(days)
@@ -36,9 +37,11 @@ function fmtBytes(b: number) {
 function pct(part: number, total: number) {
   return total > 0 ? ((part / total) * 100).toFixed(1) + "%" : "—"
 }
-function flag(code: string) {
-  if (!code || code.length !== 2) return "🌍"
-  return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join("")
+const regionNames = new Intl.DisplayNames(["en"], { type: "region" })
+function countryName(code: string) {
+  if (!code || code.length !== 2) return code
+  try { return regionNames.of(code.toUpperCase()) ?? code }
+  catch { return code }
 }
 function changePct(curr: number, prev: number) {
   if (prev === 0) return 0
@@ -122,8 +125,18 @@ function PositionBadge({ pos }: { pos: number }) {
 function CountryRow({ code, pct, maxPct, color }: { code: string; pct: number; maxPct: number; color: string }) {
   return (
     <div className="flex items-center gap-3 text-sm">
-      <span className="w-5 text-center shrink-0 text-base">{flag(code)}</span>
-      <span className="flex-1 text-white/65 truncate font-medium">{code}</span>
+      {code.length === 2 && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`https://flagcdn.com/24x18/${code.toLowerCase()}.png`}
+          srcSet={`https://flagcdn.com/48x36/${code.toLowerCase()}.png 2x`}
+          width={20}
+          height={15}
+          alt={code}
+          className="shrink-0 rounded-[2px] object-cover"
+        />
+      )}
+      <span className="flex-1 text-white/65 truncate font-medium">{countryName(code)}</span>
       <div className="w-20 h-[3px] bg-[#1a1a1a] rounded-full overflow-hidden shrink-0">
         <div className="h-full rounded-full" style={{ width: `${(pct / maxPct) * 100}%`, background: color }} />
       </div>
@@ -206,26 +219,45 @@ async function CloudflareSection({ days }: { days: number }) {
   const currPPV = rumCurr.visits > 0 ? rumCurr.pageViews / rumCurr.visits : 0
   const prevPPV = rumPrev.visits  > 0 ? rumPrev.pageViews / rumPrev.visits : 0
 
-  const reqSpark   = currDays.map(d => d.sum.requests)
-  const visitSpark = currRumDays.map(d => d.sum.visits)
-  const ppvSpark   = currRumDays.map(d => d.sum.visits > 0 ? d.count / d.sum.visits : 0)
+  const reqSpark  = currDays.map(d => d.sum.requests)
+  const uniqSpark = currDays.map(d => d.uniq.uniques)
+  const ppvSpark  = currRumDays.map(d => d.sum.visits > 0 ? d.count / d.sum.visits : 0)
   const periodLabel = `${days}d`
 
-  // Join by date, not by index — RUM skips days with 0 visits so array lengths can differ
-  const rumByDate = new Map(currRumDays.map(d => [d.dimensions.date, d.sum.visits]))
+  // Website Performance — exponential-decay score per day (bounded 92-100), see lib/webvitals.ts
+  const allVitalsDays  = data.rumVitalsDays
+  const currVitalsDays = allVitalsDays.length >= days ? allVitalsDays.slice(-days) : allVitalsDays
+
+  const currPerfScores = currVitalsDays
+    .map(d => computeDailyPerformanceScore(d.quantiles))
+    .filter((s): s is number => s !== null)
+
+  const hasPerf    = currPerfScores.length > 0
+  const currPerf   = hasPerf ? currPerfScores.reduce((a, b) => a + b, 0) / currPerfScores.length : 0
+  const perfSpark  = currPerfScores
+
   const trafficData = currDays.map(d => ({
     date:     d.dimensions.date,
     requests: d.sum.requests,
-    visits:   rumByDate.get(d.dimensions.date) ?? 0,
+    visits:   d.uniq.uniques,
   }))
 
-  const rumCountriesData = data.rumCountries
-  const totalVisits  = rumCountriesData.reduce((s, c) => s + c.sum.visits, 0)
-  const mapCountries = rumCountriesData.map(c => ({
-    code:   c.dimensions.countryName,
-    visits: c.sum.visits,
-    pct:    totalVisits > 0 ? (c.sum.visits / totalVisits) * 100 : 0,
-  }))
+  // Countries — aggregate CDN per-country request counts across the window
+  // (Cloudflare doesn't expose a per-country unique-visitor breakdown, only a zone-wide total)
+  const countryTotals = new Map<string, number>()
+  for (const d of currDays) {
+    for (const c of d.sum.countryMap) {
+      countryTotals.set(c.clientCountryName, (countryTotals.get(c.clientCountryName) ?? 0) + c.requests)
+    }
+  }
+  const totalCountryRequests = [...countryTotals.values()].reduce((s, v) => s + v, 0)
+  const mapCountries = [...countryTotals.entries()]
+    .map(([code, requests]) => ({
+      code,
+      visits: requests,
+      pct:    totalCountryRequests > 0 ? (requests / totalCountryRequests) * 100 : 0,
+    }))
+    .sort((a, b) => b.visits - a.visits)
   const topMapCountries = mapCountries.slice(0, 8)
   const maxCountryPct   = topMapCountries[0]?.pct ?? 1
 
@@ -240,23 +272,25 @@ async function CloudflareSection({ days }: { days: number }) {
       <SectionHeader number="01" title="Website Traffic" />
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <SparklineCard label="Total Requests" value={fmtNum(H.requests)}
-          change={prevRumDays.length ? changePct(H.requests, Hprev.requests) : undefined}
+          change={prevDays.length ? changePct(H.requests, Hprev.requests) : undefined}
           data={reqSpark} color="#818cf8" gradientId="grad-req"
-          sub={`CDN layer · ${days} days`} periodLabel={periodLabel} />
+          periodLabel={periodLabel} />
         <SparklineCard label="Unique Visitors"
-          value={hasRUM ? fmtNum(rumCurr.visits) : fmtNum(H.uniques)}
-          change={hasRUM && prevRumDays.length ? changePct(rumCurr.visits, rumPrev.visits) : undefined}
-          data={hasRUM ? visitSpark : currDays.map(d => d.uniq.uniques)}
+          value={fmtNum(H.uniques)}
+          change={prevDays.length ? changePct(H.uniques, Hprev.uniques) : undefined}
+          data={uniqSpark}
           color="#34d399" gradientId="grad-vis"
-          sub={hasRUM ? `RUM sessions · ${days} days` : `CDN estimate · ${days} days`}
           periodLabel={periodLabel} />
         <SparklineCard label="Pages Per Visit"
           value={hasRUM ? currPPV.toFixed(2) : "—"}
           change={hasRUM && prevPPV > 0 ? changePct(currPPV, prevPPV) : undefined}
           data={hasRUM ? ppvSpark : []} color="#fbbf24" gradientId="grad-ppv"
-          sub={hasRUM ? "Avg page views per session" : "Requires RUM beacon"}
+          periodLabel={periodLabel} />
+        <SparklineCard label="Website Performance"
+          value={hasPerf ? currPerf.toFixed(1) : "—"}
+          data={hasPerf ? perfSpark : []} color="#f472b6" gradientId="grad-perf"
           periodLabel={periodLabel} />
       </div>
 
@@ -270,13 +304,13 @@ async function CloudflareSection({ days }: { days: number }) {
       {/* Requests + Visitors — separate charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardHeader title="Total Requests" sub={`CDN · ${days} days`} />
+          <CardHeader title="Total Requests" />
           <div className="p-5 h-52">
             <SingleLineChart data={trafficData} dataKey="requests" name="Requests" color="#818cf8" />
           </div>
         </Card>
         <Card>
-          <CardHeader title="Unique Visitors" sub={`RUM sessions · ${days} days`} />
+          <CardHeader title="Unique Visitors" />
           <div className="p-5 h-52">
             <SingleLineChart data={trafficData} dataKey="visits" name="Visitors" color="#34d399" />
           </div>
@@ -285,12 +319,12 @@ async function CloudflareSection({ days }: { days: number }) {
 
       {/* World Map — full card with inline country list */}
       <Card>
-        <CardHeader title="Visitors by Country" sub="RUM · 7 days" />
+        <CardHeader title="Visitors by Country" />
         <div className="grid grid-cols-1 lg:grid-cols-5">
           <div className="lg:col-span-3 p-4" style={{ height: "460px" }}>
             <WorldMap countries={mapCountries} accentColor="#818cf8" />
           </div>
-          <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-3">
+          <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-6">
             {topMapCountries.map((c, i) => (
               <CountryRow key={i} code={c.code} pct={c.pct} maxPct={maxCountryPct} color="#818cf8" />
             ))}
@@ -301,14 +335,14 @@ async function CloudflareSection({ days }: { days: number }) {
       {/* Daily Breakdown */}
       <Card>
         <CardHeader title="Daily Breakdown" sub={`${days} days`} />
-        <div className="px-5 pt-4 pb-5">
+        <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "460px" }}>
           <table className="w-full">
             <thead>
               <tr className="border-b border-[#222]">
                 <Th>Date</Th>
                 <Th right>Requests</Th>
-                {hasRUM && <Th right>Unique Visits</Th>}
-                {hasRUM && <Th right>Pages / Visit</Th>}
+                <Th right>Unique Visits</Th>
+                <Th right>Pages / Visit</Th>
               </tr>
             </thead>
             <tbody>
@@ -316,18 +350,14 @@ async function CloudflareSection({ days }: { days: number }) {
                 <tr key={d.dimensions.date} className="hover:bg-white/[0.02] transition-colors">
                   <Td><span className="text-white/65">{d.dimensions.date}</span></Td>
                   <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(d.sum.requests)}</span></Td>
-                  {hasRUM && (
-                    <Td right>
-                      <span className="tabular-nums text-white/65">{currRumDays[i] ? fmtNum(currRumDays[i].sum.visits) : "—"}</span>
-                    </Td>
-                  )}
-                  {hasRUM && (
-                    <Td right>
-                      <span className="tabular-nums text-white/65">
-                        {currRumDays[i] && currRumDays[i].sum.visits > 0 ? (currRumDays[i].count / currRumDays[i].sum.visits).toFixed(2) : "—"}
-                      </span>
-                    </Td>
-                  )}
+                  <Td right>
+                    <span className="tabular-nums text-white/65">{fmtNum(d.uniq.uniques)}</span>
+                  </Td>
+                  <Td right>
+                    <span className="tabular-nums text-white/65">
+                      {currRumDays[i] && currRumDays[i].sum.visits > 0 ? (currRumDays[i].count / currRumDays[i].sum.visits).toFixed(2) : "—"}
+                    </span>
+                  </Td>
                 </tr>
               ))}
             </tbody>
@@ -502,7 +532,7 @@ async function SearchConsoleSection({ days }: { days: number }) {
           </Card>
 
           <Card className="lg:col-span-3">
-            <CardHeader title="Search Queries" sub={`Top 25 · ${days} days`} />
+            <CardHeader title="Search Queries" sub={`${days} days`} />
             <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "320px" }}>
               <table className="w-full">
                 <thead>
@@ -518,7 +548,7 @@ async function SearchConsoleSection({ days }: { days: number }) {
                   {web.topQueries.map((r, i) => (
                     <tr key={i} className="hover:bg-white/[0.02] transition-colors">
                       <Td>
-                        <span className="truncate block max-w-[200px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span>
+                        <span className="block max-w-[280px] text-white/70 whitespace-normal break-words">{r.keys[0]}</span>
                       </Td>
                       <Td right><PositionBadge pos={r.position} /></Td>
                       <Td right><span className="font-semibold tabular-nums text-white/85">{fmtNum(r.clicks)}</span></Td>
@@ -543,7 +573,7 @@ async function SearchConsoleSection({ days }: { days: number }) {
           <div className="lg:col-span-3 p-4" style={{ height: "460px" }}>
             <WorldMap countries={scCountryMapData} accentColor="#a78bfa" />
           </div>
-          <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-3">
+          <div className="lg:col-span-2 px-5 py-5 border-t lg:border-t-0 lg:border-l border-[#1a1a1a] space-y-6">
             {topSCCountries.length === 0 && (
               <p className="text-sm text-white/35">No country data yet</p>
             )}
@@ -585,7 +615,7 @@ async function SearchConsoleSection({ days }: { days: number }) {
                 <tbody>
                   {image.topQueries.map((r, i) => (
                     <tr key={i} className="hover:bg-white/[0.02] transition-colors">
-                      <Td><span className="truncate block max-w-[180px] text-white/70" title={r.keys[0]}>{r.keys[0]}</span></Td>
+                      <Td><span className="block max-w-[280px] text-white/70 whitespace-normal break-words">{r.keys[0]}</span></Td>
                       <Td right><PositionBadge pos={r.position} /></Td>
                       <Td right><span className="text-white/50 tabular-nums">{fmtNum(r.impressions)}</span></Td>
                       <Td right><span className="text-white/50 tabular-nums">{(r.ctr * 100).toFixed(1)}%</span></Td>
@@ -676,7 +706,7 @@ async function BingSection({ days }: { days: number }) {
 
   return (
     <section className="space-y-5">
-      <SectionHeader number="03" title="Bing Webmaster Tools" />
+      <SectionHeader number="04" title="Bing Webmaster Tools" />
 
       {!bing && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-400">
@@ -730,7 +760,7 @@ async function BingSection({ days }: { days: number }) {
       {bing && bing.pageInfo.length > 0 && (
         <Card>
           <CardHeader title="Bing Crawl Status" sub="Per-page crawl info" />
-          <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll">
+          <div className="px-5 pt-4 pb-5 overflow-auto thin-scroll" style={{ maxHeight: "460px" }}>
             <table className="w-full">
               <thead>
                 <tr className="border-b border-[#222]">
@@ -831,8 +861,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ r
       <main className="max-w-[1400px] mx-auto px-4 sm:px-6 py-5 sm:py-8 space-y-10 sm:space-y-14">
         <Suspense fallback={<SectionSkeleton />}><CloudflareSection days={days} /></Suspense>
         <Suspense fallback={<SectionSkeleton />}><SearchConsoleSection days={days} /></Suspense>
-        <Suspense fallback={<SectionSkeleton />}><BingSection days={days} /></Suspense>
         <Suspense fallback={<SectionSkeleton />}><GeoSectionLoader days={days} /></Suspense>
+        <Suspense fallback={<SectionSkeleton />}><BingSection days={days} /></Suspense>
       </main>
     </div>
   )

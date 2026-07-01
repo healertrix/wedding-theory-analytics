@@ -24,9 +24,8 @@ function ChatGPTLogo({ size = 20 }: { size?: number }) {
 
 function GeminiLogo({ size = 20 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M12 24A14.304 14.304 0 0 0 0 12 14.304 14.304 0 0 0 12 0a14.304 14.304 0 0 0 12 12 14.304 14.304 0 0 0-12 12" />
-    </svg>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/gemini.svg" width={size} height={size} alt="Gemini" style={{ objectFit: "contain" }} />
   )
 }
 
@@ -41,6 +40,13 @@ function ModelLogo({ model, size = 20 }: { model: ModelKey; size?: number }) {
   if (model === "chatgpt") return <ChatGPTLogo size={size} />
   if (model === "gemini")  return <GeminiLogo size={size} />
   return <ClaudeLogo size={size} />
+}
+
+function CopilotLogo({ size = 20 }: { size?: number }) {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/copilot.svg" width={size} height={size} alt="Copilot" style={{ objectFit: "contain" }} />
+  )
 }
 
 // ── Primitives ────────────────────────────────────────────────────────────────
@@ -175,6 +181,45 @@ function ModelCard({
               fill={`url(#${m.gradientId})`} dot={false} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
+// ── Copilot Card ──────────────────────────────────────────────────────────────
+// Copilot answers are grounded in Bing's index, so % of sitemap pages Bing has
+// crawled is used as a proxy for Copilot visibility readiness.
+
+const COPILOT_COLOR = "#8b5cf6"
+
+function CopilotCard({ crawlPct }: { crawlPct: number | null }) {
+  const scoreColor =
+    crawlPct === null ? "#666" :
+    crawlPct >= 60 ? "#10b981" :
+    crawlPct >= 35 ? "#f59e0b" :
+    crawlPct >= 10 ? "#f97316" : "#ef4444"
+
+  return (
+    <div className="rounded-xl border border-[#222] bg-[#111] flex flex-col overflow-hidden hover:border-[#333] transition-colors">
+      <div className="px-5 pt-5 pb-3 flex-1">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="flex items-center justify-center w-7 h-7 rounded-lg shrink-0"
+            style={{ background: "rgba(139,92,246,0.12)", color: COPILOT_COLOR }}>
+            <CopilotLogo size={15} />
+          </span>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em]" style={{ color: COPILOT_COLOR }}>
+            Copilot
+          </p>
+        </div>
+
+        <p className="text-3xl font-bold tabular-nums tracking-tight" style={{ color: scoreColor }}>
+          {crawlPct !== null ? `${crawlPct.toFixed(0)}%` : "—"}
+        </p>
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-white/30 mt-0.5">Bing Crawl Coverage</p>
+
+        <p className="text-xs text-white/35 mt-2">
+          {crawlPct !== null ? "% of sitemap pages crawled by Bing" : "No Bing crawl data yet"}
+        </p>
       </div>
     </div>
   )
@@ -364,17 +409,19 @@ export function GeoSection({
   scoreHistory,
   hasAnyData = false,
   days = 7,
+  bingCrawlPct = null,
 }: {
   latestRun:    GeoRunResult | null
   scoreHistory: GeoScoreSnapshot[]
   hasAnyData?:  boolean
   days?:        number
+  bingCrawlPct?: number | null
 }) {
   // ── No data in selected range ──────────────────────────────────────────────
   if (scoreHistory.length === 0) {
     return (
       <section className="space-y-5">
-        <SectionHeader number="04" title="GEO / AI Visibility" />
+        <SectionHeader number="03" title="GEO / AI Visibility" />
         <div className="rounded-xl border border-[#222] bg-[#111] flex flex-col items-center gap-4 py-14">
           {hasAnyData ? (
             <>
@@ -397,13 +444,14 @@ export function GeoSection({
 
   return (
     <section className="space-y-5">
-      <SectionHeader number="04" title="GEO / AI Visibility" />
+      <SectionHeader number="03" title="GEO / AI Visibility" />
 
       {/* Model cards — score + sparkline from history, context from latest run */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {MODELS.map(m => (
           <ModelCard key={m} model={m} scoreHistory={scoreHistory} latestRun={latestRun} />
         ))}
+        <CopilotCard crawlPct={bingCrawlPct} />
       </div>
 
       {/* Prompt vs Position — always latest run */}

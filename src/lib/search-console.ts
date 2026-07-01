@@ -153,7 +153,7 @@ async function fetchType(token: string, siteUrl: string, searchType: string, day
   const { startDate, endDate }       = buildRange(days)
   const { startDate: sPrev, endDate: ePrev } = buildPrevRange(days)
 
-  const base     = { startDate, endDate, searchType, rowLimit: 25 }
+  const base     = { startDate, endDate, searchType, rowLimit: 1000 }
   const basePrev = { startDate: sPrev, endDate: ePrev, searchType, rowLimit: 1, dimensions: [] as string[] }
 
   const [rSum, rSumPrev, rDate, rQuery, rPage, rCountry, rDevice] = await Promise.all([
