@@ -4,7 +4,6 @@ import { getCloudflareData } from "@/lib/cloudflare"
 import { getSearchConsoleData, getPageInspections } from "@/lib/search-console"
 import { getBingData } from "@/lib/bing"
 import { DateFilter } from "@/components/DateFilter"
-import { UserMenu } from "@/components/UserMenu"
 import { SparklineCard } from "@/components/SparklineCard"
 import { SingleLineChart, SCChart } from "@/components/TrafficChart"
 import { DonutChartsRow, DonutChart } from "@/components/DonutCharts"
@@ -825,9 +824,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ r
           <div className="col-span-2 sm:col-span-1 flex justify-start sm:justify-center">
             <DateFilter current={range} />
           </div>
-          <div className="flex justify-end">
-            <UserMenu />
-          </div>
+          <div className="flex justify-end" />
         </div>
       </header>
 
